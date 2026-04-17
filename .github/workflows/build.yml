@@ -1,0 +1,68 @@
+name: Build Blender Addon (PolySplines)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download PolySplines source
+        shell: pwsh
+        run: |
+          curl -L -o src.zip "https://bitbucket.org/surflab/polyhedral_splines/get/master.zip"
+          Expand-Archive src.zip
+          $dir = Get-ChildItem -Directory | Where-Object { $_.Name -like "surflab-*" }
+          Rename-Item $dir[0].FullName poly_src
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build deps
+        run: pip install scikit-build-core pybind11 cmake ninja
+
+      - name: Build PolySplines Python module
+        run: pip install ./poly_src --no-build-isolation
+
+      - name: Locate built module
+        id: find
+        shell: pwsh
+        run: |
+          $site = python -c "import site; print(site.getsitepackages()[0])"
+          $pyd = Get-ChildItem "$site" -Recurse -Filter "*.pyd" | Where-Object { $_.Name -like "*polyhedral*" } | Select-Object -First 1
+          if (-not $pyd) { Write-Error "Module not found"; exit 1 }
+          echo "PYD=$($pyd.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Prepare addon
+        shell: pwsh
+        run: |
+          $dest = "addon_build/pns_exporter"
+          $lib  = "$dest/lib"
+
+          New-Item -ItemType Directory -Force -Path $lib
+
+          Copy-Item -Recurse addon/pns_exporter/* $dest
+
+          Copy-Item "${{ steps.find.outputs.PYD }}" $lib
+
+          # Copy required DLLs
+          Get-ChildItem -Recurse -Filter "*.dll" | ForEach-Object {
+            Copy-Item $_.FullName $lib -ErrorAction SilentlyContinue
+          }
+
+      - name: Zip addon
+        run: |
+          cd addon_build
+          powershell Compress-Archive pns_exporter pns_exporter.zip
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-addon
+          path: addon_build/pns_exporter.zip
