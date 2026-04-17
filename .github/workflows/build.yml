@@ -8,61 +8,106 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # 1. Checkout your repo (contains addon code)
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # 2. Download PolySplines source
       - name: Download PolySplines source
         shell: pwsh
         run: |
           curl -L -o src.zip "https://bitbucket.org/surflab/polyhedral_splines/get/master.zip"
-          Expand-Archive src.zip
-          $dir = Get-ChildItem -Directory | Where-Object { $_.Name -like "surflab-*" }
-          Rename-Item $dir[0].FullName poly_src
 
+          Expand-Archive src.zip -DestinationPath extracted
+
+          Write-Host "Extracted contents:"
+          Get-ChildItem -Recurse extracted
+
+          # Get extracted folder safely
+          $dirs = Get-ChildItem extracted -Directory
+
+          if ($dirs.Count -eq 0) {
+            Write-Error "No folders extracted"
+            exit 1
+          }
+
+          Rename-Item $dirs[0].FullName poly_src
+
+      # 3. Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install build deps
-        run: pip install scikit-build-core pybind11 cmake ninja
+      # 4. Install build tools
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install scikit-build-core pybind11 cmake ninja
 
-      - name: Build PolySplines Python module
-        run: pip install ./poly_src --no-build-isolation
+      # 5. Build PolySplines Python module
+      - name: Build PolySplines module
+        run: |
+          pip install ./poly_src --no-build-isolation
 
+      # 6. Locate built .pyd
       - name: Locate built module
         id: find
         shell: pwsh
         run: |
           $site = python -c "import site; print(site.getsitepackages()[0])"
+
+          Write-Host "Searching in: $site"
+
           $pyd = Get-ChildItem "$site" -Recurse -Filter "*.pyd" | Where-Object { $_.Name -like "*polyhedral*" } | Select-Object -First 1
-          if (-not $pyd) { Write-Error "Module not found"; exit 1 }
+
+          if (-not $pyd) {
+            Write-Error "Build failed: .pyd not found"
+            exit 1
+          }
+
+          Write-Host "Found module: $($pyd.FullName)"
+
           echo "PYD=$($pyd.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Prepare addon
+      # 7. Assemble Blender addon
+      - name: Assemble addon
         shell: pwsh
         run: |
           $dest = "addon_build/pns_exporter"
           $lib  = "$dest/lib"
 
-          New-Item -ItemType Directory -Force -Path $lib
+          # Clean previous
+          Remove-Item addon_build -Recurse -Force -ErrorAction SilentlyContinue
 
-          Copy-Item -Recurse addon/pns_exporter/* $dest
+          # Create structure
+          New-Item -ItemType Directory -Force -Path $lib | Out-Null
 
+          # Copy addon files (IMPORTANT: contents, not folder)
+          Copy-Item -Recurse -Force addon/pns_exporter/* $dest
+
+          # Copy compiled module
           Copy-Item "${{ steps.find.outputs.PYD }}" $lib
 
-          # Copy required DLLs
+          # Copy required DLLs (if any)
           Get-ChildItem -Recurse -Filter "*.dll" | ForEach-Object {
             Copy-Item $_.FullName $lib -ErrorAction SilentlyContinue
           }
 
-      - name: Zip addon
-        run: |
-          cd addon_build
-          powershell Compress-Archive pns_exporter pns_exporter.zip
+          # Debug structure
+          Write-Host "Final addon structure:"
+          Get-ChildItem -Recurse $dest
 
-      - name: Upload
+      # 8. Zip addon
+      - name: Create zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path addon_build/pns_exporter -DestinationPath pns_exporter.zip
+
+      # 9. Upload artifact
+      - name: Upload addon
         uses: actions/upload-artifact@v4
         with:
           name: blender-addon
-          path: addon_build/pns_exporter.zip
+          path: pns_exporter.zip
+          retention-days: 90
