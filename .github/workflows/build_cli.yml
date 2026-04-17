@@ -1,0 +1,95 @@
+name: Build PolySplines CLI (Windows)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # 1. Download source
+      - name: Download PolySplines source
+        shell: pwsh
+        run: |
+          curl -L -o src.zip "https://bitbucket.org/surflab/polyhedral_splines/get/master.zip"
+          Expand-Archive src.zip -DestinationPath extracted
+          $dir = Get-ChildItem extracted -Directory | Select-Object -First 1
+          Rename-Item $dir.FullName poly_src
+
+      # 2. Add CLI entry point
+      - name: Inject CLI main.cpp
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path poly_src/src/cli | Out-Null
+
+          @"
+#include <iostream>
+#include "ProcessMesh.h"
+#include "PatchConsumer/IGSWriter.h"
+
+int main(int argc, char** argv)
+{
+    if (argc < 3)
+    {
+        std::cout << "Usage: polyspline_cli input.obj output.igs\n";
+        return 1;
+    }
+
+    std::string in = argv[1];
+    std::string out = argv[2];
+
+    ProcessMesh proc;
+    proc.loadMesh(in);
+    proc.buildPNS();
+
+    auto patches = proc.getPatches();
+
+    IGSWriter writer;
+    writer.write(out, patches);
+
+    std::cout << "Done\n";
+    return 0;
+}
+"@ | Set-Content poly_src/src/cli/main.cpp
+
+      # 3. Modify CMake to add executable
+      - name: Patch CMakeLists
+        shell: pwsh
+        run: |
+          Add-Content poly_src/CMakeLists.txt @"
+
+add_executable(polyspline_cli src/cli/main.cpp)
+target_link_libraries(polyspline_cli pns_core)
+"@
+
+      # 4. Build
+      - name: Build CLI
+        shell: pwsh
+        run: |
+          cd poly_src
+          mkdir build
+          cd build
+          cmake .. -A x64
+          cmake --build . --config Release
+
+      # 5. Collect EXE
+      - name: Collect CLI
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem poly_src/build -Recurse -Filter "polyspline_cli.exe" | Select-Object -First 1
+
+          if (-not $exe) {
+            Write-Error "EXE not found"
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Force -Path output | Out-Null
+          Copy-Item $exe.FullName output/
+
+      # 6. Upload
+      - name: Upload CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: polyspline_cli
+          path: output/polyspline_cli.exe
